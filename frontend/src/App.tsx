@@ -2,6 +2,11 @@ import { useEffect, useState, type ChangeEvent } from "react";
 import type { Report, ReportRow } from "./types";
 
 const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const apiBase = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
+
+function apiUrl(path: string): string {
+  return `${apiBase}${path}`;
+}
 
 function formatDate(iso: string | null): string {
   if (!iso) return "—";
@@ -33,7 +38,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    void fetch("/api/report")
+    void fetch(apiUrl("/api/report"))
       .then((response) => response.json())
       .then((nextReport: Report) => setReport(nextReport))
       .catch(() => {
@@ -61,7 +66,7 @@ export function App() {
       const form = new FormData();
       for (const file of receiptFiles) form.append("receipts", file);
       if (statementFile) form.append("statement", statementFile);
-      const response = await fetch("/api/reconcile", { method: "POST", body: form });
+      const response = await fetch(apiUrl("/api/reconcile"), { method: "POST", body: form });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error ?? "Reconciliation failed.");
       setReport(body as Report);
@@ -77,7 +82,7 @@ export function App() {
     setClearing(true);
     setError(null);
     try {
-      const response = await fetch("/api/clear", { method: "POST" });
+      const response = await fetch(apiUrl("/api/clear"), { method: "POST" });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error ?? "Could not clear the tables.");
       setReport(body as Report);
@@ -206,7 +211,7 @@ function PairCard({ row }: { row: ReportRow }) {
   const [previewOpen, setPreviewOpen] = useState(false);
   const receiptAmount = row.receipt?.amountFils ?? null;
   const statementAmount = row.statementLine?.amountFils ?? null;
-  const imageSrc = row.receipt ? `/receipts/${encodeURIComponent(row.receipt.fileName)}` : "";
+  const imageSrc = row.receipt ? apiUrl(`/receipts/${encodeURIComponent(row.receipt.fileName)}`) : "";
 
   return (
     <article className={`card ${row.status}`}>
