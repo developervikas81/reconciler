@@ -194,18 +194,23 @@ export function App() {
             </ul>
           ) : null}
         </label>
-        <label className="picker">
-          <span className="kicker">Card statement</span>
-          <strong>Choose a CSV</strong>
-          <input
-            key={statementInputKey}
-            type="file"
-            accept=".csv,text/csv"
-            disabled={busy}
-            onChange={onStatement}
-          />
-          <p className="meta">{statementFile ? statementFile.name : "Choose a CSV. Saving it replaces the stored statement."}</p>
-        </label>
+        <div className="picker">
+          <label>
+            <span className="kicker">Card statement</span>
+            <strong>Choose a CSV</strong>
+            <input
+              key={statementInputKey}
+              type="file"
+              accept=".csv,text/csv"
+              disabled={busy}
+              onChange={onStatement}
+            />
+            <p className="meta">{statementFile ? statementFile.name : "Choose a CSV. Saving it replaces the stored statement."}</p>
+          </label>
+          <p className="meta sample-note">Required columns are date, description, amount_aed, and ref. card_last4 is optional. Dates are YYYY-MM-DD. Amounts use two decimals, such as 47.50.</p>
+          <pre className="sample">{`date,description,amount_aed,card_last4,ref
+2026-06-02,CAREEM RIDE DUBAI,47.50,4417,TXN307023`}</pre>
+        </div>
       </section>
 
       <div className="actions">

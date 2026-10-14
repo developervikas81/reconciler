@@ -56,6 +56,21 @@ h1 {
 
 .picker strong { display: block; margin-bottom: 8px; }
 
+.picker label { display: block; }
+
+.sample-note { margin-top: 12px; }
+
+.sample {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  overflow: auto;
+  background: #f6f1e8;
+  border-radius: 10px;
+  color: #3d3832;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .picker input { display: block; max-width: 100%; }
 
 .file-list {
