@@ -2,6 +2,8 @@ import { useEffect, useState, type ChangeEvent } from "react";
 import type { Report, ReportRow } from "./types";
 
 const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const maxReceipts = 100;
+const maxImageBytes = 50 * 1024;
 const apiBase = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
 
 function apiUrl(path: string): string {
@@ -32,10 +34,15 @@ function statusLabel(row: ReportRow): string {
 export function App() {
   const [receiptFiles, setReceiptFiles] = useState<File[]>([]);
   const [statementFile, setStatementFile] = useState<File | null>(null);
+  const [receiptInputKey, setReceiptInputKey] = useState(0);
+  const [statementInputKey, setStatementInputKey] = useState(0);
   const [report, setReport] = useState<Report | null>(null);
+  const [savingReceipts, setSavingReceipts] = useState(false);
+  const [savingStatement, setSavingStatement] = useState(false);
   const [running, setRunning] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const busy = savingReceipts || savingStatement || running || clearing;
 
   useEffect(() => {
     void fetch(apiUrl("/api/report"))
@@ -47,26 +54,78 @@ export function App() {
   }, []);
 
   function onReceipts(event: ChangeEvent<HTMLInputElement>) {
-    setReceiptFiles(Array.from(event.target.files ?? []));
+    const files = Array.from(event.target.files ?? []);
+    const oversized = files.find((file) => file.size > maxImageBytes);
+    if (files.length > maxReceipts) {
+      setReceiptFiles([]);
+      setError(`You can upload at most ${maxReceipts} receipt photos at once.`);
+      event.target.value = "";
+      return;
+    }
+    if (oversized) {
+      setReceiptFiles([]);
+      setError(`${oversized.name} is larger than 50 KB.`);
+      event.target.value = "";
+      return;
+    }
+    setError(null);
+    setReceiptFiles(files);
   }
 
   function onStatement(event: ChangeEvent<HTMLInputElement>) {
+    setError(null);
     setStatementFile(event.target.files?.[0] ?? null);
   }
 
   const hasSavedReceipts = (report?.summary.receiptCount ?? 0) > 0;
   const hasSavedStatement = (report?.summary.statementCount ?? 0) > 0;
-  const canReconcile = (receiptFiles.length > 0 || hasSavedReceipts) && (statementFile !== null || hasSavedStatement) && (receiptFiles.length > 0 || statementFile !== null);
 
-  async function reconcile() {
-    if (!canReconcile) return;
-    setRunning(true);
+  async function saveReceipts() {
+    if (receiptFiles.length === 0) return;
+    setSavingReceipts(true);
     setError(null);
     try {
       const form = new FormData();
       for (const file of receiptFiles) form.append("receipts", file);
-      if (statementFile) form.append("statement", statementFile);
-      const response = await fetch(apiUrl("/api/reconcile"), { method: "POST", body: form });
+      const response = await fetch(apiUrl("/api/receipts"), { method: "POST", body: form });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error ?? "Could not save the receipts.");
+      setReport(body as Report);
+      setReceiptFiles([]);
+      setReceiptInputKey((key) => key + 1);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not save the receipts.");
+    } finally {
+      setSavingReceipts(false);
+    }
+  }
+
+  async function saveStatement() {
+    if (!statementFile) return;
+    setSavingStatement(true);
+    setError(null);
+    try {
+      const form = new FormData();
+      form.append("statement", statementFile);
+      const response = await fetch(apiUrl("/api/statement"), { method: "POST", body: form });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error ?? "Could not save the statement.");
+      setReport(body as Report);
+      setStatementFile(null);
+      setStatementInputKey((key) => key + 1);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not save the statement.");
+    } finally {
+      setSavingStatement(false);
+    }
+  }
+
+  async function reconcile() {
+    if (!hasSavedReceipts || !hasSavedStatement) return;
+    setRunning(true);
+    setError(null);
+    try {
+      const response = await fetch(apiUrl("/api/reconcile"), { method: "POST" });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error ?? "Reconciliation failed.");
       setReport(body as Report);
@@ -107,7 +166,7 @@ export function App() {
         <div>
           <h1>Receipt Reconciler</h1>
           <p className="lede">
-            Upload receipt photos and the card statement. Photos you already saved stay, so a later run can add only the ones you left out.
+            Save receipt photos and the card statement first. Reconcile uses only what is already stored.
           </p>
         </div>
       </header>
@@ -117,16 +176,17 @@ export function App() {
           <span className="kicker">Receipt photos</span>
           <strong>Choose images</strong>
           <input
+            key={receiptInputKey}
             type="file"
             accept="image/png,image/jpeg,image/webp,image/gif"
             multiple
-            disabled={running || clearing}
+            disabled={busy}
             onChange={onReceipts}
           />
           <p className="meta">
             {receiptFiles.length === 0
-              ? "Saved photos stay. Choose only the ones you still need to add."
-              : `${receiptFiles.length} new photos selected.`}
+              ? "Up to 100 photos, 50 KB each. Saved photos stay until you clear them."
+              : `${receiptFiles.length} photos selected.`}
           </p>
           {receiptFiles.length > 0 ? (
             <ul className="file-list">
@@ -138,12 +198,13 @@ export function App() {
           <span className="kicker">Card statement</span>
           <strong>Choose a CSV</strong>
           <input
+            key={statementInputKey}
             type="file"
             accept=".csv,text/csv"
-            disabled={running || clearing}
+            disabled={busy}
             onChange={onStatement}
           />
-          <p className="meta">{statementFile ? statementFile.name : "Use the saved statement, or choose a new CSV."}</p>
+          <p className="meta">{statementFile ? statementFile.name : "Choose a CSV. Saving it replaces the stored statement."}</p>
         </label>
       </section>
 
@@ -151,21 +212,39 @@ export function App() {
         <div className="action-row">
           <button
             type="button"
-            onClick={() => void reconcile()}
-            disabled={running || clearing || !canReconcile}
+            onClick={() => void saveReceipts()}
+            disabled={busy || receiptFiles.length === 0}
           >
-            {running ? "Reading receipts…" : "Reconcile"}
+            {savingReceipts ? "Reading receipts…" : "Save receipts"}
+          </button>
+          <button
+            type="button"
+            onClick={() => void saveStatement()}
+            disabled={busy || !statementFile}
+          >
+            {savingStatement ? "Saving statement…" : "Save statement"}
+          </button>
+          <button
+            type="button"
+            onClick={() => void reconcile()}
+            disabled={busy || !hasSavedReceipts || !hasSavedStatement}
+          >
+            {running ? "Reconciling…" : "Reconcile"}
           </button>
           <button
             type="button"
             className="danger"
             onClick={() => void clearTables()}
-            disabled={running || clearing || !report?.hasRun}
+            disabled={busy || !report?.hasRun}
           >
             {clearing ? "Clearing…" : "Clear tables"}
           </button>
         </div>
-        <p className="meta">Only the new photos are read. Use Clear tables to start over.</p>
+        <p className="meta">
+          {report
+            ? `${report.summary.receiptCount} receipts saved · ${report.summary.statementCount} statement lines saved.`
+            : "Save both sides, then reconcile."}
+        </p>
       </div>
 
       {error ? <div className="error">{error}</div> : null}
@@ -185,9 +264,9 @@ export function App() {
       ) : (
         <section className="empty">
           <p>
-            {running
-              ? "Extracting merchant, amount, and date from each photo, then matching both ways. The first run takes about a minute."
-              : "Add the receipt photos and the statement CSV, then reconcile. The report lists matched pairs, both unmatched sides, duplicates, and amount mismatches."}
+            {savingReceipts
+              ? "Reading merchant, amount, and date from each photo, then storing the receipts."
+              : "Save the receipt photos and the statement CSV. Reconcile after both are stored. The report lists matched pairs, both unmatched sides, duplicates, and amount mismatches."}
           </p>
         </section>
       )}

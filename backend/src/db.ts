@@ -130,6 +130,99 @@ export function loadStatementDrafts(db: DatabaseSync): StatementDraft[] {
   }));
 }
 
+export function countReceipts(db: DatabaseSync): number {
+  const row = db.prepare(`SELECT COUNT(*) AS count FROM receipts`).get() as SqlRow;
+  return Number(row.count ?? 0);
+}
+
+export function insertReceipts(db: DatabaseSync, receipts: ReceiptDraft[]): void {
+  const insertReceipt = db.prepare(`
+    INSERT INTO receipts (
+      file_name, merchant, amount_fils, txn_date, txn_time, receipt_number, card_last4, raw_text
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  db.exec("BEGIN");
+  try {
+    for (const receipt of receipts) {
+      insertReceipt.run(
+        receipt.fileName,
+        receipt.merchant,
+        receipt.amountFils,
+        receipt.txnDate,
+        receipt.txnTime,
+        receipt.receiptNumber,
+        receipt.cardLast4,
+        receipt.rawText,
+      );
+    }
+    db.exec("DELETE FROM matches");
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+export function replaceStatementLines(db: DatabaseSync, lines: StatementDraft[]): void {
+  const insertLine = db.prepare(`
+    INSERT INTO statement_lines (txn_date, description, amount_fils, card_last4, ref)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+
+  db.exec("BEGIN");
+  try {
+    db.exec("DELETE FROM matches");
+    db.exec("DELETE FROM statement_lines");
+    for (const line of lines) {
+      insertLine.run(line.txnDate, line.description, line.amountFils, line.cardLast4, line.ref);
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+export function replaceMatches(db: DatabaseSync, matches: MatchDraft[]): void {
+  const insertMatch = db.prepare(`
+    INSERT INTO matches (receipt_id, statement_line_id, status, reason)
+    VALUES (?, ?, ?, ?)
+  `);
+
+  db.exec("BEGIN");
+  try {
+    db.exec("DELETE FROM matches");
+
+    const receiptIds = new Map<string, number>();
+    for (const row of db.prepare(`SELECT id, file_name FROM receipts`).all() as SqlRow[]) {
+      receiptIds.set(String(row.file_name), Number(row.id));
+    }
+
+    const lineIds = new Map<string, number>();
+    for (const row of db.prepare(`SELECT id, ref FROM statement_lines`).all() as SqlRow[]) {
+      lineIds.set(String(row.ref), Number(row.id));
+    }
+
+    for (const match of matches) {
+      const receiptId = match.fileName ? receiptIds.get(match.fileName) ?? null : null;
+      const lineId = match.ref ? lineIds.get(match.ref) ?? null : null;
+      if (match.fileName && receiptId == null) {
+        throw new Error(`Match refers to unknown receipt ${match.fileName}.`);
+      }
+      if (match.ref && lineId == null) {
+        throw new Error(`Match refers to unknown statement ${match.ref}.`);
+      }
+      insertMatch.run(receiptId, lineId, match.status, match.reason);
+    }
+
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
 export function addReceiptsAndRematch(
   db: DatabaseSync,
   newReceipts: ReceiptDraft[],

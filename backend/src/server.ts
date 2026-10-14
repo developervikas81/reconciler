@@ -4,13 +4,15 @@ import multer from "multer";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { parseStatementCsv } from "./csv.js";
-import { addReceiptsAndRematch, clearTables, loadReceiptDrafts, loadReport, loadStatementDrafts, openDatabase } from "./db.js";
+import { clearTables, countReceipts, insertReceipts, loadReceiptDrafts, loadReport, loadStatementDrafts, openDatabase, replaceMatches, replaceStatementLines } from "./db.js";
 import { readReceiptImages } from "./extract.js";
 import { reconcile } from "./reconcile.js";
 
 const uploadRoot = path.resolve(process.cwd(), "data", "uploads");
 const receiptsDir = path.join(uploadRoot, "receipts");
 const port = Number(process.env.PORT ?? 3001);
+const maxReceipts = 100;
+const maxImageBytes = 50 * 1024;
 const imageExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
 
 const db = openDatabase();
@@ -18,9 +20,14 @@ let running = false;
 
 mkdirSync(receiptsDir, { recursive: true });
 
-const upload = multer({
+const receiptUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 8 * 1024 * 1024, files: 101 },
+  limits: { fileSize: maxImageBytes, files: maxReceipts },
+});
+
+const statementUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 1024 * 1024, files: 1 },
 });
 
 function safeFileName(originalName: string, index: number): string {
@@ -45,6 +52,25 @@ app.get("/api/report", (_req, res) => {
   res.json(loadReport(db));
 });
 
+function uploadError(error: unknown, res: express.Response, kind: "receipts" | "statement"): void {
+  if (error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE") {
+    const message = kind === "receipts"
+      ? "Each receipt photo must be 50 KB or smaller."
+      : "The statement CSV must be 1 MB or smaller.";
+    res.status(400).json({ error: message });
+    return;
+  }
+  if (error instanceof multer.MulterError && (error.code === "LIMIT_FILE_COUNT" || error.code === "LIMIT_UNEXPECTED_FILE")) {
+    const message = kind === "receipts"
+      ? `You can upload at most ${maxReceipts} receipt photos at once.`
+      : "Choose one statement CSV.";
+    res.status(400).json({ error: message });
+    return;
+  }
+  const message = error instanceof Error ? error.message : "Upload failed.";
+  res.status(400).json({ error: message });
+}
+
 app.post("/api/clear", (_req, res) => {
   if (running) {
     res.status(409).json({ error: "A reconciliation is already running." });
@@ -64,15 +90,11 @@ app.post("/api/clear", (_req, res) => {
 });
 
 app.post(
-  "/api/reconcile",
+  "/api/receipts",
   (req, res, next) => {
-    upload.fields([
-      { name: "receipts", maxCount: 100 },
-      { name: "statement", maxCount: 1 },
-    ])(req, res, (error: unknown) => {
+    receiptUpload.array("receipts", maxReceipts)(req, res, (error: unknown) => {
       if (error) {
-        const message = error instanceof Error ? error.message : "Upload failed.";
-        res.status(400).json({ error: message });
+        uploadError(error, res, "receipts");
         return;
       }
       next();
@@ -80,26 +102,23 @@ app.post(
   },
   async (req, res) => {
     if (running) {
-      res.status(409).json({ error: "A reconciliation is already running." });
+      res.status(409).json({ error: "A save or reconciliation is already running." });
       return;
     }
 
-    const uploaded = req.files as { receipts?: Express.Multer.File[]; statement?: Express.Multer.File[] } | undefined;
-    const receiptFiles = uploaded?.receipts ?? [];
-    const statementFile = uploaded?.statement?.[0];
-
-    if (receiptFiles.length === 0 && loadReceiptDrafts(db).length === 0) {
-      res.status(400).json({ error: "Add at least one receipt photo." });
+    const receiptFiles = (req.files as Express.Multer.File[] | undefined) ?? [];
+    if (receiptFiles.length === 0) {
+      res.status(400).json({ error: "Choose at least one receipt photo." });
+      return;
+    }
+    if (countReceipts(db) + receiptFiles.length > maxReceipts) {
+      res.status(400).json({ error: `You can store at most ${maxReceipts} receipt photos.` });
       return;
     }
 
-    if (!statementFile && loadStatementDrafts(db).length === 0) {
-      res.status(400).json({ error: "Add the statement CSV." });
-      return;
-    }
-
-    if (statementFile && path.extname(statementFile.originalname).toLowerCase() !== ".csv") {
-      res.status(400).json({ error: "The statement must be a CSV file." });
+    const oversized = receiptFiles.find((file) => file.size > maxImageBytes);
+    if (oversized) {
+      res.status(400).json({ error: `${oversized.originalname} is larger than 50 KB.` });
       return;
     }
 
@@ -117,15 +136,11 @@ app.post(
         writeFileSync(filePath, file.buffer);
         return { fileName, filePath };
       });
-
-      const fresh = saved.length > 0 ? await readReceiptImages(saved) : [];
-      const statement = statementFile ? parseStatementCsv(statementFile.buffer.toString("utf8")) : loadStatementDrafts(db);
-      const receipts = [...loadReceiptDrafts(db), ...fresh];
-      const matches = reconcile(receipts, statement);
-      addReceiptsAndRematch(db, fresh, statementFile ? statement : null, matches);
+      const fresh = await readReceiptImages(saved);
+      insertReceipts(db, fresh);
       res.json(loadReport(db));
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Reconciliation failed.";
+      const message = error instanceof Error ? error.message : "Could not save the receipts.";
       console.error(error);
       res.status(500).json({ error: message });
     } finally {
@@ -133,6 +148,78 @@ app.post(
     }
   },
 );
+
+app.post(
+  "/api/statement",
+  (req, res, next) => {
+    statementUpload.single("statement")(req, res, (error: unknown) => {
+      if (error) {
+        uploadError(error, res, "statement");
+        return;
+      }
+      next();
+    });
+  },
+  (req, res) => {
+    if (running) {
+      res.status(409).json({ error: "A save or reconciliation is already running." });
+      return;
+    }
+
+    const statementFile = req.file;
+    if (!statementFile) {
+      res.status(400).json({ error: "Choose a statement CSV." });
+      return;
+    }
+    if (path.extname(statementFile.originalname).toLowerCase() !== ".csv") {
+      res.status(400).json({ error: "The statement must be a CSV file." });
+      return;
+    }
+
+    running = true;
+    try {
+      const statement = parseStatementCsv(statementFile.buffer.toString("utf8"));
+      replaceStatementLines(db, statement);
+      res.json(loadReport(db));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not save the statement.";
+      console.error(error);
+      res.status(500).json({ error: message });
+    } finally {
+      running = false;
+    }
+  },
+);
+
+app.post("/api/reconcile", (_req, res) => {
+  if (running) {
+    res.status(409).json({ error: "A save or reconciliation is already running." });
+    return;
+  }
+
+  const receipts = loadReceiptDrafts(db);
+  const statement = loadStatementDrafts(db);
+  if (receipts.length === 0) {
+    res.status(400).json({ error: "Save receipt photos before reconciling." });
+    return;
+  }
+  if (statement.length === 0) {
+    res.status(400).json({ error: "Save the statement CSV before reconciling." });
+    return;
+  }
+
+  running = true;
+  try {
+    replaceMatches(db, reconcile(receipts, statement));
+    res.json(loadReport(db));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Reconciliation failed.";
+    console.error(error);
+    res.status(500).json({ error: message });
+  } finally {
+    running = false;
+  }
+});
 
 app.listen(port, () => {
   console.log(`API listening on http://localhost:${port}`);
